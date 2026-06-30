@@ -1,0 +1,1054 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const APP_NAME = "My Health";
+const CREATOR = "Chunchu Dilip Kumar";
+const VERSION = "2.0.0";
+
+// ── In-memory DB ─────────────────────────────────────────────────────────────
+const DB = { users: {}, records: {}, medicines: {}, doctors: {}, prevReports: {} };
+const getUser = (e) => DB.users[e];
+const saveUser = (u) => { DB.users[u.email] = u; };
+const getRecords = (e) => DB.records[e] || [];
+const setRecords = (e, r) => { DB.records[e] = r; };
+const addRecord = (e, r) => { DB.records[e] = [r, ...(DB.records[e] || [])]; };
+const getMeds = (e) => DB.medicines[e] || [];
+const saveMeds = (e, m) => { DB.medicines[e] = m; };
+const getDoctors = (e) => DB.doctors[e] || [];
+const setDoctors = (e, d) => { DB.doctors[e] = d; };
+const addDoctor = (e, d) => { DB.doctors[e] = [d, ...(DB.doctors[e] || [])]; };
+const getPrevReports = (e) => DB.prevReports[e] || [];
+const addPrevReport = (e, r) => { DB.prevReports[e] = [r, ...(DB.prevReports[e] || [])]; };
+const delPrevReport = (e, id) => { DB.prevReports[e] = (DB.prevReports[e] || []).filter(r => r.id !== id); };
+
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+
+function greeting(name) {
+  const h = new Date().getHours();
+  const g = h < 12 ? "Good Morning" : h < 17 ? "Good Afternoon" : h < 21 ? "Good Evening" : "Good Night";
+  return name ? `${g}, ${name}! 👋` : g;
+}
+const fmt = (iso) => new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+const fmtDate = (iso) => new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+
+function bpStatus(s, d) {
+  s = +s; d = +d;
+  if (s < 120 && d < 80) return { label: "Normal", color: "#27ae60" };
+  if (s < 130 && d < 80) return { label: "Elevated", color: "#f39c12" };
+  if (s < 140 || d < 90) return { label: "High Stage 1", color: "#e67e22" };
+  return { label: "High Stage 2", color: "#e74c3c" };
+}
+function sugarStatus(v, t) {
+  v = +v;
+  if (t === "fasting") { if (v < 100) return { label: "Normal", color: "#27ae60" }; if (v < 126) return { label: "Pre-diabetic", color: "#f39c12" }; return { label: "Diabetic", color: "#e74c3c" }; }
+  if (v < 140) return { label: "Normal", color: "#27ae60" }; if (v < 200) return { label: "Pre-diabetic", color: "#f39c12" }; return { label: "Diabetic", color: "#e74c3c" };
+}
+
+// ── QR Code generator using Google Charts API (canvas fallback) ──────────────
+function QRDisplay({ data, size = 160 }) {
+  const [failed, setFailed] = useState(false);
+  const encoded = encodeURIComponent(data);
+  const url = `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encoded}&bgcolor=ffffff&color=1a6b4a&margin=6`;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+      {!failed ? (
+        <img src={url} alt="QR Code" width={size} height={size} style={{ borderRadius: 10, border: "3px solid #d4e8d4", background: "#fff" }} onError={() => setFailed(true)} />
+      ) : (
+        <div style={{ width: size, height: size, borderRadius: 10, border: "3px solid #d4e8d4", background: "#fff5f5", display: "flex", alignItems: "center", justifyContent: "center", padding: 10, textAlign: "center", fontSize: 11, color: C.danger }}>
+          ⚠️ QR couldn't load (check internet). Try again or use Share/Save instead.
+        </div>
+      )}
+      <div style={{ fontSize: 10, color: "#888", textAlign: "center" }}>Scan with any QR scanner (Google Lens, camera app) to view report</div>
+    </div>
+  );
+}
+
+// ── Build QR data string for a user's full report ────────────────────────────
+function buildQRData(user) {
+  const records = getRecords(user.email);
+  const meds = getMeds(user.email).filter(m => m.active);
+  const docs = getDoctors(user.email);
+  const prevReps = getPrevReports(user.email);
+  const lastBP = records.find(r => r.type === "bp");
+  const lastSugar = records.find(r => r.type === "sugar");
+  const lines = [
+    `My Health Report`,
+    `Patient: ${user.name}`,
+    `DOB: ${user.dob || "N/A"} | Gender: ${user.gender || "N/A"}`,
+    `---`,
+    lastBP ? `BP: ${lastBP.sys}/${lastBP.dia} mmHg (${bpStatus(lastBP.sys, lastBP.dia).label}) on ${fmtDate(lastBP.ts)}` : "BP: No data",
+    lastSugar ? `Sugar: ${lastSugar.value} mg/dL (${sugarStatus(lastSugar.value, lastSugar.stype).label}) on ${fmtDate(lastSugar.ts)}` : "Sugar: No data",
+    `---`,
+    meds.length ? `Medicines: ${meds.map(m => `${m.name} ${m.dose}`).join(", ")}` : "Medicines: None",
+    docs.length ? `Last Dr: ${docs[0].name} (${docs[0].specialty || ""}) ${fmtDate(docs[0].date)}` : "Doctor: None",
+    `Total Records: ${records.length}`,
+  ];
+  if (prevReps.length) {
+    lines.push(`---`, `Previous Reports (${prevReps.length}):`);
+    prevReps.slice(0, 6).forEach(r => {
+      lines.push(`• ${r.title} [${r.reportType}] - ${fmtDate(r.date)}`);
+    });
+    if (prevReps.length > 6) lines.push(`...+${prevReps.length - 6} more (open app to view all)`);
+  } else {
+    lines.push(`---`, `Previous Reports: None`);
+  }
+  lines.push(`Generated: ${fmt(new Date().toISOString())}`, `App: ${APP_NAME} by ${CREATOR}`);
+
+  let text = lines.join("\n");
+  // Safety cap: free QR generation APIs/scanners can fail or render unreadable codes
+  // past ~900 chars, so trim gracefully instead of producing a broken/blank QR.
+  const MAX_QR_CHARS = 900;
+  if (text.length > MAX_QR_CHARS) {
+    text = text.slice(0, MAX_QR_CHARS - 40).trimEnd() + `\n...(open My Health app for full report)`;
+  }
+  return text;
+}
+
+// ── Color palette ─────────────────────────────────────────────────────────────
+const C = {
+  bg: "#f0f4f8", card: "#ffffff", primary: "#1a6b4a", primaryLight: "#e8f5ee",
+  accent: "#2ecc71", danger: "#e74c3c", warning: "#f39c12",
+  text: "#1a2e1a", sub: "#5a7a5a", border: "#d4e8d4", blue: "#2980b9",
+};
+
+const S = {
+  app: { minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'Segoe UI',system-ui,sans-serif", display: "flex", flexDirection: "column", maxWidth: 430, margin: "0 auto", position: "relative" },
+  header: { background: C.primary, padding: "13px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 50, boxShadow: "0 2px 12px rgba(26,107,74,.3)" },
+  screen: { flex: 1, overflowY: "auto", padding: "12px 12px 90px" },
+  bottomNav: { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 430, background: "#fff", borderTop: `1px solid ${C.border}`, display: "flex", zIndex: 40, boxShadow: "0 -2px 12px rgba(0,0,0,.08)" },
+  navBtn: (a) => ({ flex: 1, padding: "9px 0 7px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, border: "none", background: "none", color: a ? C.primary : "#bbb", cursor: "pointer", fontSize: 9, fontWeight: a ? 800 : 400, transition: "color .2s" }),
+  card: { background: C.card, borderRadius: 14, padding: 14, marginBottom: 10, boxShadow: "0 2px 8px rgba(0,0,0,.05)", border: `1px solid ${C.border}` },
+  input: { width: "100%", background: "#f8fdf8", border: `1.5px solid ${C.border}`, borderRadius: 10, padding: "10px 13px", color: C.text, fontSize: 14, outline: "none", boxSizing: "border-box", fontFamily: "inherit" },
+  label: { fontSize: 12, color: C.sub, marginBottom: 4, display: "block", fontWeight: 600 },
+  row: { display: "flex", gap: 10 },
+  btn: (v = "primary") => ({
+    border: "none", borderRadius: 10, padding: "11px 18px", fontWeight: 700, cursor: "pointer", fontSize: 14, transition: "all .2s",
+    display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+    ...(v === "primary" ? { background: C.primary, color: "#fff", width: "100%" }
+      : v === "ghost" ? { background: "transparent", color: C.primary, border: `1.5px solid ${C.primary}` }
+      : v === "danger" ? { background: C.danger, color: "#fff", fontSize: 12, padding: "7px 11px", borderRadius: 8 }
+      : v === "sm" ? { background: C.primaryLight, color: C.primary, fontSize: 12, padding: "6px 11px", borderRadius: 8, fontWeight: 600 }
+      : v === "edit" ? { background: "#fff3cd", color: "#856404", fontSize: 12, padding: "6px 11px", borderRadius: 8, fontWeight: 600, border: "1px solid #ffc107" }
+      : {})
+  }),
+  badge: (color) => ({ display: "inline-block", padding: "2px 9px", borderRadius: 20, fontSize: 11, fontWeight: 700, background: color + "22", color, border: `1px solid ${color}44` }),
+  toast: (t) => ({ position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", background: t === "err" ? C.danger : C.primary, color: "#fff", padding: "10px 20px", borderRadius: 10, fontSize: 13, fontWeight: 700, zIndex: 9999, whiteSpace: "nowrap", boxShadow: "0 4px 20px rgba(0,0,0,.25)" }),
+  overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" },
+  sheet: { background: C.card, borderRadius: "20px 20px 0 0", padding: 22, width: "100%", maxWidth: 430, maxHeight: "92vh", overflowY: "auto" },
+  sectionTitle: { fontWeight: 800, fontSize: 14, color: C.primary, marginBottom: 10, display: "flex", alignItems: "center", gap: 5 },
+};
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function Toast({ msg, type }) {
+  if (!msg) return null;
+  return <div style={S.toast(type)}>{msg}</div>;
+}
+
+// ── Terms ─────────────────────────────────────────────────────────────────────
+function TermsScreen({ onBack }) {
+  return (
+    <div style={{ ...S.app, overflowY: "auto", padding: 16 }}>
+      <button onClick={onBack} style={{ ...S.btn("ghost"), width: "auto", marginBottom: 14 }}>← Back</button>
+      <div style={S.card}>
+        <h2 style={{ color: C.primary, marginBottom: 4, fontSize: 18 }}>Terms of Service</h2>
+        <div style={{ fontSize: 11, color: C.sub, marginBottom: 14 }}>My Health v{VERSION} · by {CREATOR}</div>
+        {[
+          ["1. Acceptance", "By registering and using My Health, you agree to these Terms."],
+          ["2. Medical Disclaimer", "My Health is a personal health tracking tool ONLY. It is NOT a substitute for professional medical advice, diagnosis, or treatment. Always consult a qualified doctor."],
+          ["3. Data Privacy", "All your health data is stored locally on this device only. My Health does not transmit your personal health information to any server or third party."],
+          ["4. QR Code Sharing", "When you share your QR code, anyone who scans it can view your health summary. Share only with trusted healthcare providers."],
+          ["5. User Responsibility", "You are responsible for the accuracy of data you enter. My Health is not liable for any decisions made based on tracked data."],
+          ["6. No Emergency Use", "Do not use My Health in a medical emergency. Call emergency services immediately."],
+          ["7. Account Security", "You are responsible for maintaining the confidentiality of your account password."],
+          ["8. Contact", `Created by ${CREATOR}. For support, use the in-app feedback option.`],
+        ].map(([h, b]) => (
+          <div key={h} style={{ marginBottom: 12 }}>
+            <div style={{ fontWeight: 700, color: C.primary, fontSize: 13, marginBottom: 2 }}>{h}</div>
+            <div style={{ color: C.sub, fontSize: 13, lineHeight: 1.6 }}>{b}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+function AuthScreen({ onLogin }) {
+  const [mode, setMode] = useState("login");
+  const [showTerms, setShowTerms] = useState(false);
+  const [form, setForm] = useState({ name: "", email: "", password: "", dob: "", gender: "Male", agree: false });
+  const [showPw, setShowPw] = useState(false);
+  const [err, setErr] = useState("");
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  if (showTerms) return <TermsScreen onBack={() => setShowTerms(false)} />;
+
+  function submit() {
+    setErr("");
+    if (mode === "register") {
+      if (!form.name.trim()) return setErr("Name is required");
+      if (!/\S+@\S+\.\S+/.test(form.email)) return setErr("Valid email required");
+      if (form.password.length < 6) return setErr("Password min 6 characters");
+      if (!form.dob) return setErr("Date of birth required");
+      if (!form.agree) return setErr("Please accept Terms of Service");
+      if (getUser(form.email)) return setErr("Email already registered");
+      const u = { name: form.name.trim(), email: form.email, password: form.password, dob: form.dob, gender: form.gender, joinedAt: new Date().toISOString() };
+      saveUser(u); onLogin(u);
+    } else {
+      const u = getUser(form.email);
+      if (!u || u.password !== form.password) return setErr("Invalid email or password");
+      onLogin(u);
+    }
+  }
+
+  return (
+    <div style={{ ...S.app, justifyContent: "center", padding: 22, background: "linear-gradient(160deg,#e8f5ee 0%,#f0f4f8 100%)" }}>
+      <div style={{ textAlign: "center", marginBottom: 24 }}>
+        <div style={{ fontSize: 52, marginBottom: 4 }}>💚</div>
+        <div style={{ fontSize: 28, fontWeight: 900, color: C.primary, letterSpacing: -1 }}>{APP_NAME}</div>
+        <div style={{ fontSize: 12, color: C.sub, marginTop: 2 }}>Your Personal Health Companion</div>
+        <div style={{ fontSize: 10, color: "#aaa", marginTop: 2 }}>by {CREATOR}</div>
+      </div>
+      <div style={S.card}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+          {["login", "register"].map(m => (
+            <button key={m} onClick={() => { setMode(m); setErr(""); }} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 13, background: mode === m ? C.primary : C.primaryLight, color: mode === m ? "#fff" : C.sub }}>
+              {m === "login" ? "Sign In" : "Register"}
+            </button>
+          ))}
+        </div>
+        {mode === "register" && <>
+          <div style={{ marginBottom: 11 }}>
+            <label style={S.label}>Full Name</label>
+            <input style={S.input} placeholder="Eg: Dilip Kumar" value={form.name} onChange={e => set("name", e.target.value)} />
+          </div>
+          <div style={{ ...S.row, marginBottom: 11 }}>
+            <div style={{ flex: 1 }}><label style={S.label}>Date of Birth</label><input style={S.input} type="date" value={form.dob} onChange={e => set("dob", e.target.value)} /></div>
+            <div style={{ flex: 1 }}><label style={S.label}>Gender</label>
+              <select style={S.input} value={form.gender} onChange={e => set("gender", e.target.value)}>{["Male", "Female", "Other"].map(g => <option key={g}>{g}</option>)}</select>
+            </div>
+          </div>
+        </>}
+        <div style={{ marginBottom: 11 }}>
+          <label style={S.label}>Email</label>
+          <input style={S.input} type="email" placeholder="you@email.com" value={form.email} onChange={e => set("email", e.target.value)} />
+        </div>
+        <div style={{ marginBottom: mode === "register" ? 12 : 18, position: "relative" }}>
+          <label style={S.label}>Password</label>
+          <input style={S.input} type={showPw ? "text" : "password"} placeholder="••••••" value={form.password} onChange={e => set("password", e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} />
+          <button onClick={() => setShowPw(p => !p)} style={{ position: "absolute", right: 12, top: 29, background: "none", border: "none", color: C.sub, cursor: "pointer", fontSize: 15 }}>{showPw ? "🙈" : "👁️"}</button>
+        </div>
+        {mode === "register" && (
+          <div style={{ marginBottom: 16, display: "flex", alignItems: "flex-start", gap: 10 }}>
+            <input type="checkbox" id="agree" checked={form.agree} onChange={e => set("agree", e.target.checked)} style={{ marginTop: 3 }} />
+            <label htmlFor="agree" style={{ fontSize: 13, color: C.sub, lineHeight: 1.5 }}>
+              I agree to the <span onClick={() => setShowTerms(true)} style={{ color: C.primary, cursor: "pointer", textDecoration: "underline", fontWeight: 700 }}>Terms of Service</span> and Privacy Policy
+            </label>
+          </div>
+        )}
+        {err && <div style={{ color: C.danger, fontSize: 13, marginBottom: 10 }}>⚠️ {err}</div>}
+        <button onClick={submit} style={S.btn("primary")}>{mode === "login" ? "Sign In" : "Create Account"}</button>
+        <div style={{ marginTop: 12, padding: "9px 12px", background: "#fff8e1", borderRadius: 8, border: "1px solid #ffe082", fontSize: 12, color: "#7a5c00" }}>
+          ⚠️ Not a substitute for medical advice. Always consult a doctor.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── QR Screen ─────────────────────────────────────────────────────────────────
+function QRScreen({ user, refresh }) {
+  const qrData = buildQRData(user);
+  const records = getRecords(user.email);
+  const lastBP = records.find(r => r.type === "bp");
+  const lastSugar = records.find(r => r.type === "sugar");
+  const meds = getMeds(user.email).filter(m => m.active);
+  const docs = getDoctors(user.email);
+
+  function shareQR() {
+    if (navigator.share) {
+      navigator.share({ title: `${user.name} - My Health Report`, text: qrData });
+    } else {
+      navigator.clipboard.writeText(qrData).then(() => alert("Report copied to clipboard!"));
+    }
+  }
+
+  function downloadQR() {
+    const url = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrData)}&bgcolor=ffffff&color=1a6b4a&margin=10`;
+    const a = document.createElement("a");
+    a.href = url; a.download = `My_Health_QR_${user.name.replace(/\s/g, "_")}.png`; a.click();
+  }
+
+  return (
+    <div>
+      <div style={S.sectionTitle}>📱 My Health QR Code</div>
+
+      {/* QR Card */}
+      <div style={{ ...S.card, textAlign: "center", background: "linear-gradient(135deg,#e8f5ee,#f0f4f8)" }}>
+        <div style={{ fontWeight: 800, fontSize: 15, color: C.primary, marginBottom: 4 }}>{user.name}</div>
+        <div style={{ fontSize: 12, color: C.sub, marginBottom: 14 }}>Scan this QR to view health report</div>
+        <QRDisplay data={qrData} size={180} />
+        <div style={{ fontSize: 10, color: "#aaa", marginTop: 8 }}>Generated: {fmt(new Date().toISOString())}</div>
+        <div style={{ ...S.row, marginTop: 14, justifyContent: "center", gap: 10 }}>
+          <button onClick={downloadQR} style={{ ...S.btn("sm"), flex: 1 }}>⬇️ Save QR</button>
+          <button onClick={shareQR} style={{ ...S.btn("sm"), flex: 1 }}>📤 Share</button>
+        </div>
+      </div>
+
+      {/* What the QR contains */}
+      <div style={S.card}>
+        <div style={S.sectionTitle}>📋 QR Contains</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          {[
+            ["🩺", "Blood Pressure", lastBP ? `${lastBP.sys}/${lastBP.dia} mmHg` : "No data"],
+            ["🩸", "Blood Sugar", lastSugar ? `${lastSugar.value} mg/dL` : "No data"],
+            ["💊", "Active Medicines", `${meds.length} medicine${meds.length !== 1 ? "s" : ""}`],
+            ["👨‍⚕️", "Doctor Visits", `${docs.length} visit${docs.length !== 1 ? "s" : ""}`],
+            ["📁", "Previous Reports", `${getPrevReports(user.email).length} report${getPrevReports(user.email).length !== 1 ? "s" : ""}`],
+          ].map(([e, l, v]) => (
+            <div key={l} style={{ background: C.primaryLight, borderRadius: 10, padding: 10 }}>
+              <div style={{ fontSize: 18 }}>{e}</div>
+              <div style={{ fontSize: 11, color: C.sub, fontWeight: 600 }}>{l}</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginTop: 2 }}>{v}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop: 12, padding: "9px 12px", background: "#fff8e1", borderRadius: 8, border: "1px solid #ffe082", fontSize: 12, color: "#7a5c00" }}>
+          ⚠️ Share your QR only with trusted doctors or healthcare providers.
+        </div>
+      </div>
+
+      {/* Full report text */}
+      <div style={S.card}>
+        <div style={S.sectionTitle}>📄 Report Preview</div>
+        <pre style={{ fontSize: 11, color: C.sub, fontFamily: "monospace", whiteSpace: "pre-wrap", lineHeight: 1.7, background: C.primaryLight, padding: 10, borderRadius: 8 }}>{qrData}</pre>
+      </div>
+    </div>
+  );
+}
+
+// ── Home ──────────────────────────────────────────────────────────────────────
+function HomeScreen({ user, onAdd, onNav }) {
+  const records = getRecords(user.email);
+  const meds = getMeds(user.email).filter(m => m.active);
+  const docs = getDoctors(user.email);
+  const prevReps = getPrevReports(user.email);
+  const lastBP = records.find(r => r.type === "bp");
+  const lastSugar = records.find(r => r.type === "sugar");
+
+  return (
+    <div>
+      {/* Greeting hero */}
+      <div style={{ ...S.card, background: `linear-gradient(135deg,${C.primary},#27ae60)`, color: "#fff", border: "none" }}>
+        <div style={{ fontSize: 15, fontWeight: 700 }}>{greeting(user.name)}</div>
+        <div style={{ fontSize: 12, opacity: .85, marginTop: 2 }}>Stay healthy. Track daily. 💪</div>
+        <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+          {[["📊", records.length, "Records"], ["💊", meds.length, "Medicines"], ["👨‍⚕️", docs.length, "Doctors"], ["📁", prevReps.length, "Old Reports"]].map(([e, v, l]) => (
+            <div key={l} style={{ textAlign: "center", flex: 1 }}>
+              <div style={{ fontSize: 16 }}>{e}</div>
+              <div style={{ fontWeight: 900, fontSize: 18 }}>{v}</div>
+              <div style={{ fontSize: 9, opacity: .8 }}>{l}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* QR shortcut */}
+      <button onClick={() => onNav("qr")} style={{ ...S.card, width: "100%", border: `2px dashed ${C.primary}`, background: C.primaryLight, display: "flex", alignItems: "center", gap: 12, cursor: "pointer", textAlign: "left", marginBottom: 10 }}>
+        <div style={{ fontSize: 32 }}>📱</div>
+        <div>
+          <div style={{ fontWeight: 800, color: C.primary, fontSize: 14 }}>My Health QR Code</div>
+          <div style={{ fontSize: 12, color: C.sub }}>Tap to view & share your health QR</div>
+        </div>
+        <div style={{ marginLeft: "auto", color: C.primary, fontSize: 18 }}>›</div>
+      </button>
+
+      {/* Quick add */}
+      <div style={S.sectionTitle}>⚡ Quick Add</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+        {[["🩺", "Blood Pressure", "bp", C.blue], ["🩸", "Blood Sugar", "sugar", C.danger], ["💊", "Medicine", "med", C.primary], ["👨‍⚕️", "Doctor Visit", "doc", "#8e44ad"], ["📁", "Old Report", "prevreport", "#e67e22"], ["📷", "Prescription Pic", "prescription", "#16a085"]].map(([e, l, t, col]) => (
+          <button key={t} onClick={() => onAdd(t)} style={{ background: C.card, border: `1.5px solid ${col}22`, borderRadius: 12, padding: "12px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 8, boxShadow: "0 2px 6px rgba(0,0,0,.04)" }}>
+            <div style={{ width: 36, height: 36, background: col + "18", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>{e}</div>
+            <div style={{ fontWeight: 700, fontSize: 12, color: C.text, textAlign: "left", lineHeight: 1.3 }}>{l}</div>
+          </button>
+        ))}
+      </div>
+
+      {/* Latest readings */}
+      <div style={S.sectionTitle}>📋 Latest Readings</div>
+      <div style={S.row}>
+        <div style={{ ...S.card, flex: 1, margin: 0 }}>
+          <div style={{ fontSize: 11, color: C.sub, fontWeight: 600 }}>🩺 BP</div>
+          {lastBP ? (() => { const st = bpStatus(lastBP.sys, lastBP.dia); return <>
+            <div style={{ fontSize: 20, fontWeight: 900, color: st.color, margin: "3px 0" }}>{lastBP.sys}/{lastBP.dia}</div>
+            <div style={{ fontSize: 10, color: C.sub }}>{fmtDate(lastBP.ts)}</div>
+            <span style={S.badge(st.color)}>{st.label}</span>
+          </>; })() : <div style={{ color: "#ccc", fontSize: 12, marginTop: 6 }}>No data</div>}
+        </div>
+        <div style={{ ...S.card, flex: 1, margin: 0 }}>
+          <div style={{ fontSize: 11, color: C.sub, fontWeight: 600 }}>🩸 Sugar</div>
+          {lastSugar ? (() => { const st = sugarStatus(lastSugar.value, lastSugar.stype); return <>
+            <div style={{ fontSize: 20, fontWeight: 900, color: st.color, margin: "3px 0" }}>{lastSugar.value}</div>
+            <div style={{ fontSize: 10, color: C.sub }}>{fmtDate(lastSugar.ts)}</div>
+            <span style={S.badge(st.color)}>{st.label}</span>
+          </>; })() : <div style={{ color: "#ccc", fontSize: 12, marginTop: 6 }}>No data</div>}
+        </div>
+      </div>
+
+      {/* Today's meds */}
+      {meds.length > 0 && <>
+        <div style={S.sectionTitle}>💊 Today's Medicines</div>
+        {meds.slice(0, 3).map(m => (
+          <div key={m.id} style={{ ...S.card, display: "flex", alignItems: "center", gap: 10, padding: 11 }}>
+            <div style={{ width: 34, height: 34, background: C.primaryLight, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>💊</div>
+            <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 13 }}>{m.name}</div><div style={{ fontSize: 11, color: C.sub }}>{m.dose} · {m.timing}</div></div>
+          </div>
+        ))}
+        {meds.length > 3 && <div style={{ textAlign: "center", color: C.sub, fontSize: 12, marginBottom: 8 }}>+{meds.length - 3} more</div>}
+      </>}
+
+      {/* Recent doctor */}
+      {docs.length > 0 && <>
+        <div style={S.sectionTitle}>👨‍⚕️ Recent Doctor Visit</div>
+        {docs.slice(0, 1).map(d => (
+          <div key={d.id} style={{ ...S.card, padding: 12 }}>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>{d.name}</div>
+            <div style={{ fontSize: 12, color: C.sub }}>{d.specialty} · {fmtDate(d.date)}</div>
+            {d.diagnosis && <div style={{ marginTop: 6, background: C.primaryLight, borderRadius: 6, padding: 7, fontSize: 12, color: C.primary }}>{d.diagnosis}</div>}
+          </div>
+        ))}
+      </>}
+    </div>
+  );
+}
+
+// ── Records Screen ────────────────────────────────────────────────────────────
+function RecordsScreen({ user, refresh, toast }) {
+  const [tab, setTab] = useState("bp");
+  const [editItem, setEditItem] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const records = getRecords(user.email).filter(r => r.type === tab);
+
+  function delRec(id) {
+    setRecords(user.email, getRecords(user.email).filter(r => r.id !== id));
+    refresh(); toast("Deleted");
+  }
+
+  function startEdit(r) {
+    setEditItem(r);
+    setEditForm({ ...r });
+  }
+
+  function saveEdit() {
+    const all = getRecords(user.email).map(r => r.id === editItem.id ? { ...editForm, id: r.id, type: r.type, ts: r.ts } : r);
+    setRecords(user.email, all);
+    setEditItem(null);
+    refresh(); toast("Updated ✅");
+  }
+
+  function downloadCSV() {
+    const all = getRecords(user.email);
+    const rows = [["Type", "Details", "Status", "Date", "Notes"],
+      ...all.map(r => r.type === "bp"
+        ? ["BP", `${r.sys}/${r.dia} mmHg`, bpStatus(r.sys, r.dia).label, fmtDate(r.ts), r.notes || ""]
+        : ["Sugar", `${r.value} mg/dL (${r.stype})`, sugarStatus(r.value, r.stype).label, fmtDate(r.ts), r.notes || ""])];
+    const csv = rows.map(r => r.map(c => `"${c}"`).join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
+    a.download = `My_Health_${user.name.replace(/\s/g, "_")}_records.csv`;
+    a.click(); toast("Downloaded!");
+  }
+
+  function shareReport() {
+    const all = getRecords(user.email).slice(0, 8);
+    const text = `My Health Report - ${user.name}\n` + all.map(r =>
+      r.type === "bp" ? `BP: ${r.sys}/${r.dia} mmHg (${bpStatus(r.sys, r.dia).label}) - ${fmtDate(r.ts)}`
+        : `Sugar: ${r.value} mg/dL (${sugarStatus(r.value, r.stype).label}) - ${fmtDate(r.ts)}`
+    ).join("\n");
+    if (navigator.share) navigator.share({ title: "My Health Report", text });
+    else navigator.clipboard.writeText(text).then(() => toast("Copied!"));
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={S.sectionTitle}>📊 Health Records</div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={downloadCSV} style={S.btn("sm")}>⬇️ CSV</button>
+          <button onClick={shareReport} style={S.btn("sm")}>📤 Share</button>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        {[["bp", "🩺 BP"], ["sugar", "🩸 Sugar"]].map(([t, l]) => (
+          <button key={t} onClick={() => setTab(t)} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 13, background: tab === t ? C.primary : C.primaryLight, color: tab === t ? "#fff" : C.sub }}>{l}</button>
+        ))}
+      </div>
+
+      {/* Trend bars */}
+      {records.length > 1 && (
+        <div style={{ ...S.card, overflowX: "auto" }}>
+          <div style={{ fontSize: 11, color: C.sub, fontWeight: 700, marginBottom: 6 }}>📈 Trend (latest {Math.min(records.length, 8)})</div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 55 }}>
+            {[...records].reverse().slice(0, 8).map((r, i) => {
+              const val = r.type === "bp" ? r.sys : r.value;
+              const max = r.type === "bp" ? 180 : 280;
+              const h = Math.max(6, (val / max) * 50);
+              const st = r.type === "bp" ? bpStatus(r.sys, r.dia) : sugarStatus(r.value, r.stype);
+              return (
+                <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
+                  <div style={{ fontSize: 7, color: C.sub }}>{val}</div>
+                  <div style={{ width: "100%", height: h, background: st.color, borderRadius: 3 }} />
+                  <div style={{ fontSize: 7, color: "#bbb" }}>{new Date(r.ts).getDate()}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {records.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "36px 0", color: "#bbb" }}><div style={{ fontSize: 36, marginBottom: 8 }}>📭</div>No {tab === "bp" ? "BP" : "Sugar"} records yet</div>
+      ) : records.map(r => {
+        const st = r.type === "bp" ? bpStatus(r.sys, r.dia) : sugarStatus(r.value, r.stype);
+        return (
+          <div key={r.id} style={{ ...S.card, padding: 12 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+              <div style={{ width: 40, height: 40, background: st.color + "18", borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>{r.type === "bp" ? "🩺" : "🩸"}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 900, fontSize: 17, color: st.color }}>{r.type === "bp" ? `${r.sys}/${r.dia}` : r.value} <span style={{ fontSize: 11, fontWeight: 400, color: C.sub }}>{r.type === "bp" ? "mmHg" : "mg/dL"}</span></div>
+                <div style={{ fontSize: 11, color: C.sub }}>{fmt(r.ts)}{r.type === "sugar" ? ` · ${r.stype}` : ""}{r.pulse ? ` · Pulse: ${r.pulse}` : ""}</div>
+                {r.notes && <div style={{ fontSize: 11, color: C.sub, fontStyle: "italic", marginTop: 2 }}>"{r.notes}"</div>}
+                <span style={S.badge(st.color)}>{st.label}</span>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                <button onClick={() => startEdit(r)} style={S.btn("edit")}>✏️</button>
+                <button onClick={() => delRec(r.id)} style={S.btn("danger")}>🗑️</button>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Edit sheet */}
+      {editItem && (
+        <div style={S.overlay}>
+          <div style={S.sheet}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div style={{ fontWeight: 800, fontSize: 15, color: C.primary }}>✏️ Edit {editItem.type === "bp" ? "BP" : "Sugar"} Reading</div>
+              <button onClick={() => setEditItem(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer" }}>✕</button>
+            </div>
+            {editItem.type === "bp" ? <>
+              <div style={S.row}>
+                <div style={{ flex: 1 }}><label style={S.label}>Systolic</label><input style={S.input} type="number" value={editForm.sys || ""} onChange={e => setEditForm(f => ({ ...f, sys: e.target.value }))} /></div>
+                <div style={{ flex: 1 }}><label style={S.label}>Diastolic</label><input style={S.input} type="number" value={editForm.dia || ""} onChange={e => setEditForm(f => ({ ...f, dia: e.target.value }))} /></div>
+              </div>
+              <div style={{ marginTop: 10 }}><label style={S.label}>Pulse (optional)</label><input style={S.input} type="number" value={editForm.pulse || ""} onChange={e => setEditForm(f => ({ ...f, pulse: e.target.value }))} /></div>
+            </> : <>
+              <div><label style={S.label}>Blood Sugar (mg/dL)</label><input style={S.input} type="number" value={editForm.value || ""} onChange={e => setEditForm(f => ({ ...f, value: e.target.value }))} /></div>
+              <div style={{ marginTop: 10 }}><label style={S.label}>Test Type</label>
+                <select style={S.input} value={editForm.stype || "fasting"} onChange={e => setEditForm(f => ({ ...f, stype: e.target.value }))}>
+                  {["fasting", "post-meal", "random"].map(t => <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>)}
+                </select>
+              </div>
+            </>}
+            <div style={{ marginTop: 10, marginBottom: 16 }}><label style={S.label}>Notes</label><textarea style={{ ...S.input, minHeight: 55, resize: "vertical" }} value={editForm.notes || ""} onChange={e => setEditForm(f => ({ ...f, notes: e.target.value }))} /></div>
+            <div style={{ padding: "8px 12px", background: "#fff3cd", borderRadius: 8, fontSize: 12, color: "#856404", marginBottom: 14 }}>ℹ️ Record date/time cannot be changed to maintain history accuracy.</div>
+            <button onClick={saveEdit} style={S.btn("primary")}>💾 Save Changes</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Medicines ─────────────────────────────────────────────────────────────────
+function MedsScreen({ user, refresh, toast, onAdd }) {
+  const [editMed, setEditMed] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const meds = getMeds(user.email);
+
+  function toggle(id) { saveMeds(user.email, meds.map(m => m.id === id ? { ...m, active: !m.active } : m)); refresh(); }
+  function del(id) { saveMeds(user.email, meds.filter(m => m.id !== id)); refresh(); toast("Removed"); }
+  function startEdit(m) { setEditMed(m); setEditForm({ ...m }); }
+  function saveEdit() {
+    saveMeds(user.email, meds.map(m => m.id === editMed.id ? { ...m, ...editForm } : m));
+    setEditMed(null); refresh(); toast("Updated ✅");
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={S.sectionTitle}>💊 Medicines</div>
+        <button onClick={() => onAdd("med")} style={S.btn("sm")}>➕ Add</button>
+      </div>
+      {meds.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "36px 0", color: "#bbb" }}><div style={{ fontSize: 36, marginBottom: 8 }}>💊</div>No medicines added</div>
+      ) : meds.map(m => (
+        <div key={m.id} style={{ ...S.card, padding: 12, opacity: m.active ? 1 : .55 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 38, height: 38, background: m.active ? C.primaryLight : "#f0f0f0", borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>💊</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{m.name}</div>
+              <div style={{ fontSize: 12, color: C.sub }}>{m.dose} · {m.timing}</div>
+              {m.notes && <div style={{ fontSize: 11, color: "#aaa" }}>{m.notes}</div>}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 5, alignItems: "flex-end" }}>
+              <button onClick={() => toggle(m.id)} style={{ ...S.btn("sm"), padding: "4px 9px", background: m.active ? C.primaryLight : "#f0f0f0", color: m.active ? C.primary : "#aaa", fontSize: 11 }}>{m.active ? "✅ Active" : "⏸ Off"}</button>
+              <div style={{ display: "flex", gap: 5 }}>
+                <button onClick={() => startEdit(m)} style={S.btn("edit")}>✏️</button>
+                <button onClick={() => del(m.id)} style={S.btn("danger")}>🗑️</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ))}
+
+      {editMed && (
+        <div style={S.overlay}>
+          <div style={S.sheet}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14 }}>
+              <div style={{ fontWeight: 800, fontSize: 15, color: C.primary }}>✏️ Edit Medicine</div>
+              <button onClick={() => setEditMed(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer" }}>✕</button>
+            </div>
+            <div style={{ marginBottom: 11 }}><label style={S.label}>Medicine Name</label><input style={S.input} value={editForm.name || ""} onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))} /></div>
+            <div style={{ marginBottom: 11 }}><label style={S.label}>Dose</label><input style={S.input} value={editForm.dose || ""} onChange={e => setEditForm(f => ({ ...f, dose: e.target.value }))} /></div>
+            <div style={{ marginBottom: 11 }}><label style={S.label}>Timing</label>
+              <select style={S.input} value={editForm.timing || "Morning"} onChange={e => setEditForm(f => ({ ...f, timing: e.target.value }))}>
+                {["Morning", "Afternoon", "Evening", "Night", "Before meals", "After meals", "Twice daily", "Thrice daily"].map(t => <option key={t}>{t}</option>)}
+              </select>
+            </div>
+            <div style={{ marginBottom: 14 }}><label style={S.label}>Notes</label><textarea style={{ ...S.input, minHeight: 50, resize: "vertical" }} value={editForm.notes || ""} onChange={e => setEditForm(f => ({ ...f, notes: e.target.value }))} /></div>
+            <button onClick={saveEdit} style={S.btn("primary")}>💾 Save</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ ...S.card, background: "#fff8e1", border: "1px solid #ffe082", marginTop: 6 }}>
+        <div style={{ fontSize: 12, color: "#7a5c00", lineHeight: 1.5 }}>⚠️ Follow your doctor's prescription. Do not self-medicate.</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Doctors ───────────────────────────────────────────────────────────────────
+function DoctorsScreen({ user, refresh, toast, onAdd }) {
+  const [editDoc, setEditDoc] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const docs = getDoctors(user.email);
+
+  function del(id) { setDoctors(user.email, docs.filter(d => d.id !== id)); refresh(); toast("Removed"); }
+  function startEdit(d) { setEditDoc(d); setEditForm({ ...d }); }
+  function saveEdit() {
+    setDoctors(user.email, docs.map(d => d.id === editDoc.id ? { ...d, ...editForm } : d));
+    setEditDoc(null); refresh(); toast("Updated ✅");
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={S.sectionTitle}>👨‍⚕️ Doctor Visits</div>
+        <button onClick={() => onAdd("doc")} style={S.btn("sm")}>➕ Add</button>
+      </div>
+      {docs.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "36px 0", color: "#bbb" }}><div style={{ fontSize: 36, marginBottom: 8 }}>👨‍⚕️</div>No doctor visits logged</div>
+      ) : docs.map(d => (
+        <div key={d.id} style={{ ...S.card, padding: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{d.name}</div>
+              <div style={{ fontSize: 12, color: C.sub }}>{d.specialty}{d.hospital ? ` · ${d.hospital}` : ""}</div>
+              <div style={{ fontSize: 11, color: C.sub }}>{fmtDate(d.date)}</div>
+            </div>
+            <div style={{ display: "flex", gap: 5 }}>
+              <button onClick={() => startEdit(d)} style={S.btn("edit")}>✏️</button>
+              <button onClick={() => del(d.id)} style={S.btn("danger")}>🗑️</button>
+            </div>
+          </div>
+          {d.diagnosis && <div style={{ marginTop: 7, background: C.primaryLight, borderRadius: 7, padding: 7, fontSize: 12, color: C.primary }}><b>Diagnosis:</b> {d.diagnosis}</div>}
+          {d.prescription && <div style={{ marginTop: 5, background: "#f3e5f5", borderRadius: 7, padding: 7, fontSize: 12, color: "#7b1fa2" }}><b>Prescription:</b> {d.prescription}</div>}
+          {d.notes && <div style={{ marginTop: 5, fontSize: 12, color: C.sub, fontStyle: "italic" }}>"{d.notes}"</div>}
+          {d.prescriptionImage && <img src={d.prescriptionImage} alt="Prescription" style={{ width: "100%", borderRadius: 8, marginTop: 7, maxHeight: 200, objectFit: "contain", border: `1px solid ${C.border}` }} />}
+        </div>
+      ))}
+
+      {editDoc && (
+        <div style={S.overlay}>
+          <div style={S.sheet}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14 }}>
+              <div style={{ fontWeight: 800, fontSize: 15, color: C.primary }}>✏️ Edit Doctor Visit</div>
+              <button onClick={() => setEditDoc(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer" }}>✕</button>
+            </div>
+            <div style={{ marginBottom: 11 }}><label style={S.label}>Doctor Name</label><input style={S.input} value={editForm.name || ""} onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))} /></div>
+            <div style={S.row}>
+              <div style={{ flex: 1, marginBottom: 11 }}><label style={S.label}>Specialty</label><input style={S.input} value={editForm.specialty || ""} onChange={e => setEditForm(f => ({ ...f, specialty: e.target.value }))} /></div>
+              <div style={{ flex: 1, marginBottom: 11 }}><label style={S.label}>Visit Date</label><input style={S.input} type="date" value={editForm.date || ""} onChange={e => setEditForm(f => ({ ...f, date: e.target.value }))} /></div>
+            </div>
+            <div style={{ marginBottom: 11 }}><label style={S.label}>Hospital / Clinic</label><input style={S.input} value={editForm.hospital || ""} onChange={e => setEditForm(f => ({ ...f, hospital: e.target.value }))} /></div>
+            <div style={{ marginBottom: 11 }}><label style={S.label}>Diagnosis</label><input style={S.input} value={editForm.diagnosis || ""} onChange={e => setEditForm(f => ({ ...f, diagnosis: e.target.value }))} /></div>
+            <div style={{ marginBottom: 11 }}><label style={S.label}>Prescription</label><input style={S.input} value={editForm.prescription || ""} onChange={e => setEditForm(f => ({ ...f, prescription: e.target.value }))} /></div>
+            <div style={{ marginBottom: 14 }}><label style={S.label}>Notes</label><textarea style={{ ...S.input, minHeight: 50, resize: "vertical" }} value={editForm.notes || ""} onChange={e => setEditForm(f => ({ ...f, notes: e.target.value }))} /></div>
+            <button onClick={saveEdit} style={S.btn("primary")}>💾 Save</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Previous Reports ──────────────────────────────────────────────────────────
+function PrevReportsScreen({ user, refresh, toast, onAdd }) {
+  const reports = getPrevReports(user.email);
+
+  function del(id) { delPrevReport(user.email, id); refresh(); toast("Removed"); }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={S.sectionTitle}>📁 Previous Reports</div>
+        <button onClick={() => onAdd("prevreport")} style={S.btn("sm")}>➕ Add</button>
+      </div>
+      <div style={{ ...S.card, background: C.primaryLight, border: `1px solid ${C.border}`, marginBottom: 12 }}>
+        <div style={{ fontSize: 13, color: C.primary, lineHeight: 1.6 }}>📋 Add your old lab reports, hospital records, or scanned documents here. Previous reports are <b>view-only</b> to preserve history accuracy.</div>
+      </div>
+      {reports.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "36px 0", color: "#bbb" }}><div style={{ fontSize: 36, marginBottom: 8 }}>📁</div>No previous reports added</div>
+      ) : reports.map(r => (
+        <div key={r.id} style={{ ...S.card, padding: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{r.title}</div>
+              <div style={{ fontSize: 11, color: C.sub }}>{r.reportType} · {fmtDate(r.date)}</div>
+              {r.hospital && <div style={{ fontSize: 11, color: C.sub }}>{r.hospital}</div>}
+              {r.summary && <div style={{ fontSize: 12, color: C.sub, marginTop: 4, fontStyle: "italic" }}>"{r.summary}"</div>}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 5, marginLeft: 8 }}>
+              <span style={S.badge(C.warning)}>📁 Old</span>
+              <button onClick={() => del(r.id)} style={S.btn("danger")}>🗑️</button>
+            </div>
+          </div>
+          {r.image && <img src={r.image} alt="Report" style={{ width: "100%", borderRadius: 8, marginTop: 8, maxHeight: 220, objectFit: "contain", border: `1px solid ${C.border}` }} />}
+          <div style={{ marginTop: 8, padding: "6px 10px", background: "#fff3cd", borderRadius: 6, fontSize: 11, color: "#856404" }}>🔒 Previous reports are view-only</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Profile ───────────────────────────────────────────────────────────────────
+function ProfileScreen({ user, onLogout, onUpdateUser, toast }) {
+  const records = getRecords(user.email);
+  const meds = getMeds(user.email);
+  const docs = getDoctors(user.email);
+  const prevReps = getPrevReports(user.email);
+  const age = user.dob ? Math.floor((Date.now() - new Date(user.dob)) / (365.25 * 24 * 3600 * 1000)) : "N/A";
+  const [editing, setEditing] = useState(false);
+  const [editForm, setEditForm] = useState({ name: user.name, dob: user.dob || "", gender: user.gender || "Male" });
+  const [err, setErr] = useState("");
+
+  function startEdit() {
+    setEditForm({ name: user.name, dob: user.dob || "", gender: user.gender || "Male" });
+    setErr("");
+    setEditing(true);
+  }
+
+  function saveProfile() {
+    if (!editForm.name.trim()) return setErr("Name is required");
+    const updated = { ...user, name: editForm.name.trim(), dob: editForm.dob, gender: editForm.gender };
+    saveUser(updated);
+    onUpdateUser(updated);
+    setEditing(false);
+    toast && toast("Profile updated ✅");
+  }
+
+  return (
+    <div>
+      <div style={{ ...S.card, background: `linear-gradient(135deg,${C.primary},#27ae60)`, color: "#fff", border: "none", textAlign: "center" }}>
+        <div style={{ width: 60, height: 60, background: "rgba(255,255,255,.2)", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 8px", fontSize: 26, fontWeight: 900 }}>{user.name.charAt(0).toUpperCase()}</div>
+        <div style={{ fontWeight: 800, fontSize: 19 }}>{user.name}</div>
+        <div style={{ fontSize: 12, opacity: .85 }}>{user.email}</div>
+        <div style={{ display: "flex", justifyContent: "center", gap: 14, marginTop: 10 }}>
+          {[["Age", age], ["Gender", user.gender || "N/A"], ["Records", records.length]].map(([l, v]) => (
+            <div key={l} style={{ textAlign: "center" }}><div style={{ fontWeight: 900, fontSize: 16 }}>{v}</div><div style={{ fontSize: 10, opacity: .8 }}>{l}</div></div>
+          ))}
+        </div>
+        <button onClick={startEdit} style={{ ...S.btn("sm"), marginTop: 12, background: "rgba(255,255,255,.22)", color: "#fff" }}>✏️ Edit Name / Details</button>
+      </div>
+
+      {editing && (
+        <div style={S.overlay}>
+          <div style={S.sheet}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div style={{ fontWeight: 800, fontSize: 15, color: C.primary }}>✏️ Edit Profile</div>
+              <button onClick={() => setEditing(false)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer" }}>✕</button>
+            </div>
+            <div style={{ marginBottom: 11 }}>
+              <label style={S.label}>Full Name</label>
+              <input style={S.input} value={editForm.name} onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))} />
+            </div>
+            <div style={{ ...S.row, marginBottom: 11 }}>
+              <div style={{ flex: 1 }}><label style={S.label}>Date of Birth</label><input style={S.input} type="date" value={editForm.dob} onChange={e => setEditForm(f => ({ ...f, dob: e.target.value }))} /></div>
+              <div style={{ flex: 1 }}><label style={S.label}>Gender</label>
+                <select style={S.input} value={editForm.gender} onChange={e => setEditForm(f => ({ ...f, gender: e.target.value }))}>{["Male", "Female", "Other"].map(g => <option key={g}>{g}</option>)}</select>
+              </div>
+            </div>
+            <div style={{ marginBottom: 14, padding: "8px 11px", background: C.primaryLight, borderRadius: 7, fontSize: 12, color: C.primary }}>ℹ️ Fixing your name/DOB here updates it everywhere instantly, including your QR code. Email can't be changed since it's your login ID.</div>
+            {err && <div style={{ color: C.danger, fontSize: 13, marginBottom: 10 }}>⚠️ {err}</div>}
+            <button onClick={saveProfile} style={S.btn("primary")}>💾 Save Changes</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+        {[["📊", "BP Records", records.filter(r => r.type === "bp").length], ["🩸", "Sugar Records", records.filter(r => r.type === "sugar").length], ["💊", "Medicines", meds.length], ["👨‍⚕️", "Doctor Visits", docs.length], ["📁", "Old Reports", prevReps.length], ["✅", "Active Meds", meds.filter(m => m.active).length]].map(([e, l, v]) => (
+          <div key={l} style={{ ...S.card, textAlign: "center", padding: 11, margin: 0 }}>
+            <div style={{ fontSize: 18 }}>{e}</div>
+            <div style={{ fontWeight: 900, fontSize: 18, color: C.primary }}>{v}</div>
+            <div style={{ fontSize: 10, color: C.sub }}>{l}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={S.card}>
+        <div style={{ fontWeight: 700, color: C.sub, fontSize: 11, marginBottom: 9 }}>ABOUT DHEALTH</div>
+        {[["App", APP_NAME], ["Version", VERSION], ["Created by", CREATOR], ["Member since", fmtDate(user.joinedAt)]].map(([k, v]) => (
+          <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: `1px solid ${C.border}` }}>
+            <span style={{ color: C.sub, fontSize: 13 }}>{k}</span>
+            <span style={{ color: C.text, fontSize: 13, fontWeight: 600 }}>{v}</span>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ ...S.card, background: C.primaryLight, border: `1px solid ${C.border}` }}>
+        <div style={{ fontSize: 13, color: C.primary, lineHeight: 1.6 }}>ℹ️ My Health stores all data locally. Your health information is private and never shared with third parties. This app is not a medical device. Always consult qualified healthcare professionals.</div>
+      </div>
+
+      <button onClick={onLogout} style={{ ...S.btn("danger"), width: "100%", padding: 13, marginTop: 4 }}>🚪 Sign Out</button>
+    </div>
+  );
+}
+
+// ── Add Sheet ─────────────────────────────────────────────────────────────────
+function AddSheet({ type, user, onClose, onSaved, toast }) {
+  const [form, setForm] = useState({
+    sys: "", dia: "", pulse: "", value: "", stype: "fasting",
+    name: "", dose: "", timing: "Morning", notes: "",
+    specialty: "", hospital: "", date: new Date().toISOString().split("T")[0],
+    diagnosis: "", prescription: "", prescriptionImage: "",
+    title: "", reportType: "Lab Report", summary: "", image: ""
+  });
+  const [err, setErr] = useState("");
+  const [imgPreview, setImgPreview] = useState(null);
+  const fileRef = useRef();
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  function handleImage(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 3 * 1024 * 1024) { toast("Image too large (max 3MB)", "err"); return; }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const b64 = ev.target.result;
+      setImgPreview(b64);
+      if (type === "prescription") set("image", b64);
+      else if (type === "doc") set("prescriptionImage", b64);
+      else set("image", b64);
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function save() {
+    setErr("");
+    if (type === "bp") {
+      if (!form.sys || !form.dia) return setErr("Enter systolic and diastolic values");
+      if (+form.sys < 50 || +form.sys > 250 || +form.dia < 30 || +form.dia > 150) return setErr("Please enter valid BP values");
+      addRecord(user.email, { id: uid(), type: "bp", sys: +form.sys, dia: +form.dia, pulse: form.pulse ? +form.pulse : null, notes: form.notes, ts: new Date().toISOString() });
+    } else if (type === "sugar") {
+      if (!form.value) return setErr("Enter blood sugar value");
+      if (+form.value < 20 || +form.value > 600) return setErr("Please enter a valid blood sugar value");
+      addRecord(user.email, { id: uid(), type: "sugar", value: +form.value, stype: form.stype, notes: form.notes, ts: new Date().toISOString() });
+    } else if (type === "med") {
+      if (!form.name.trim()) return setErr("Medicine name required");
+      if (!form.dose.trim()) return setErr("Dose required");
+      saveMeds(user.email, [{ id: uid(), name: form.name.trim(), dose: form.dose.trim(), timing: form.timing, notes: form.notes, active: true, addedAt: new Date().toISOString() }, ...getMeds(user.email)]);
+    } else if (type === "doc") {
+      if (!form.name.trim()) return setErr("Doctor name required");
+      if (!form.date) return setErr("Visit date required");
+      addDoctor(user.email, { id: uid(), name: form.name.trim(), specialty: form.specialty, hospital: form.hospital, date: form.date, diagnosis: form.diagnosis, prescription: form.prescription, prescriptionImage: form.prescriptionImage, notes: form.notes, ts: new Date().toISOString() });
+    } else if (type === "prevreport") {
+      if (!form.title.trim()) return setErr("Report title required");
+      if (!form.date) return setErr("Report date required");
+      addPrevReport(user.email, { id: uid(), title: form.title.trim(), reportType: form.reportType, hospital: form.hospital, date: form.date, summary: form.summary, image: form.image, addedAt: new Date().toISOString() });
+    } else if (type === "prescription") {
+      if (!imgPreview) return setErr("Please select a prescription image");
+      addPrevReport(user.email, { id: uid(), title: `Prescription - ${fmtDate(form.date)}`, reportType: "Prescription", hospital: form.hospital, date: form.date, summary: form.notes, image: form.image, addedAt: new Date().toISOString() });
+    }
+    onSaved(); toast("Saved ✅"); onClose();
+  }
+
+  const titles = { bp: "🩺 Add Blood Pressure", sugar: "🩸 Add Blood Sugar", med: "💊 Add Medicine", doc: "👨‍⚕️ Add Doctor Visit", prevreport: "📁 Add Previous Report", prescription: "📷 Add Prescription Photo" };
+
+  return (
+    <div style={S.overlay} onClick={onClose}>
+      <div style={S.sheet} onClick={e => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontWeight: 800, fontSize: 15, color: C.primary }}>{titles[type]}</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: C.sub }}>✕</button>
+        </div>
+
+        {type === "bp" && <>
+          <div style={S.row}>
+            <div style={{ flex: 1 }}><label style={S.label}>Systolic (mmHg) *</label><input style={S.input} type="number" placeholder="120" value={form.sys} onChange={e => set("sys", e.target.value)} /></div>
+            <div style={{ flex: 1 }}><label style={S.label}>Diastolic (mmHg) *</label><input style={S.input} type="number" placeholder="80" value={form.dia} onChange={e => set("dia", e.target.value)} /></div>
+          </div>
+          <div style={{ marginTop: 10 }}><label style={S.label}>Pulse (bpm) — optional</label><input style={S.input} type="number" placeholder="72" value={form.pulse} onChange={e => set("pulse", e.target.value)} /></div>
+          {form.sys && form.dia && +form.sys > 0 && +form.dia > 0 && (() => { const st = bpStatus(+form.sys, +form.dia); return <div style={{ marginTop: 8, padding: 9, borderRadius: 7, background: st.color + "15", border: `1px solid ${st.color}44`, color: st.color, fontSize: 13, fontWeight: 700 }}>Status: {st.label}</div>; })()}
+        </>}
+
+        {type === "sugar" && <>
+          <div><label style={S.label}>Blood Sugar (mg/dL) *</label><input style={S.input} type="number" placeholder="90" value={form.value} onChange={e => set("value", e.target.value)} /></div>
+          <div style={{ marginTop: 10 }}><label style={S.label}>Test Type</label>
+            <select style={S.input} value={form.stype} onChange={e => set("stype", e.target.value)}>{["fasting", "post-meal", "random"].map(t => <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>)}</select>
+          </div>
+          {form.value && +form.value > 0 && (() => { const st = sugarStatus(+form.value, form.stype); return <div style={{ marginTop: 8, padding: 9, borderRadius: 7, background: st.color + "15", border: `1px solid ${st.color}44`, color: st.color, fontSize: 13, fontWeight: 700 }}>Status: {st.label}</div>; })()}
+        </>}
+
+        {type === "med" && <>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Medicine Name *</label><input style={S.input} placeholder="Eg: Metformin 500mg" value={form.name} onChange={e => set("name", e.target.value)} /></div>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Dose *</label><input style={S.input} placeholder="Eg: 1 tablet" value={form.dose} onChange={e => set("dose", e.target.value)} /></div>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Timing</label>
+            <select style={S.input} value={form.timing} onChange={e => set("timing", e.target.value)}>{["Morning", "Afternoon", "Evening", "Night", "Before meals", "After meals", "Twice daily", "Thrice daily"].map(t => <option key={t}>{t}</option>)}</select>
+          </div>
+        </>}
+
+        {type === "doc" && <>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Doctor Name *</label><input style={S.input} placeholder="Dr. Sharma" value={form.name} onChange={e => set("name", e.target.value)} /></div>
+          <div style={S.row}>
+            <div style={{ flex: 1, marginBottom: 10 }}><label style={S.label}>Specialty</label><input style={S.input} placeholder="Cardiologist" value={form.specialty} onChange={e => set("specialty", e.target.value)} /></div>
+            <div style={{ flex: 1, marginBottom: 10 }}><label style={S.label}>Visit Date *</label><input style={S.input} type="date" value={form.date} onChange={e => set("date", e.target.value)} /></div>
+          </div>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Hospital / Clinic</label><input style={S.input} placeholder="City Hospital" value={form.hospital} onChange={e => set("hospital", e.target.value)} /></div>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Diagnosis</label><input style={S.input} placeholder="Hypertension Stage 1" value={form.diagnosis} onChange={e => set("diagnosis", e.target.value)} /></div>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Prescription</label><input style={S.input} placeholder="Amlodipine 5mg once daily" value={form.prescription} onChange={e => set("prescription", e.target.value)} /></div>
+          <div style={{ marginBottom: 10 }}>
+            <label style={S.label}>📷 Prescription Photo (optional)</label>
+            <input ref={fileRef} type="file" accept="image/*" onChange={handleImage} style={{ display: "none" }} />
+            <button onClick={() => fileRef.current.click()} style={{ ...S.btn("sm"), width: "100%", justifyContent: "center" }}>📷 Choose Image</button>
+            {imgPreview && <img src={imgPreview} alt="preview" style={{ width: "100%", borderRadius: 8, marginTop: 8, maxHeight: 180, objectFit: "contain" }} />}
+          </div>
+        </>}
+
+        {type === "prevreport" && <>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Report Title *</label><input style={S.input} placeholder="Blood Test Report" value={form.title} onChange={e => set("title", e.target.value)} /></div>
+          <div style={S.row}>
+            <div style={{ flex: 1, marginBottom: 10 }}><label style={S.label}>Report Type</label>
+              <select style={S.input} value={form.reportType} onChange={e => set("reportType", e.target.value)}>{["Lab Report", "ECG", "X-Ray", "MRI/CT Scan", "Prescription", "Discharge Summary", "Other"].map(t => <option key={t}>{t}</option>)}</select>
+            </div>
+            <div style={{ flex: 1, marginBottom: 10 }}><label style={S.label}>Report Date *</label><input style={S.input} type="date" value={form.date} onChange={e => set("date", e.target.value)} /></div>
+          </div>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Hospital / Lab</label><input style={S.input} placeholder="City Lab" value={form.hospital} onChange={e => set("hospital", e.target.value)} /></div>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Summary / Key Findings</label><textarea style={{ ...S.input, minHeight: 55, resize: "vertical" }} placeholder="Summary of findings..." value={form.summary} onChange={e => set("summary", e.target.value)} /></div>
+          <div style={{ marginBottom: 10 }}>
+            <label style={S.label}>📷 Upload Report Image (optional)</label>
+            <input ref={fileRef} type="file" accept="image/*" onChange={handleImage} style={{ display: "none" }} />
+            <button onClick={() => fileRef.current.click()} style={{ ...S.btn("sm"), width: "100%", justifyContent: "center" }}>📷 Choose Photo</button>
+            {imgPreview && <img src={imgPreview} alt="preview" style={{ width: "100%", borderRadius: 8, marginTop: 8, maxHeight: 200, objectFit: "contain" }} />}
+          </div>
+          <div style={{ padding: "8px 11px", background: "#fff3cd", borderRadius: 7, fontSize: 12, color: "#856404", marginBottom: 12 }}>🔒 Previous reports cannot be edited after saving.</div>
+        </>}
+
+        {type === "prescription" && <>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Doctor / Hospital</label><input style={S.input} placeholder="Dr. Sharma / City Hospital" value={form.hospital} onChange={e => set("hospital", e.target.value)} /></div>
+          <div style={{ marginBottom: 10 }}><label style={S.label}>Prescription Date</label><input style={S.input} type="date" value={form.date} onChange={e => set("date", e.target.value)} /></div>
+          <div style={{ marginBottom: 10 }}>
+            <label style={S.label}>📷 Prescription Photo *</label>
+            <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleImage} style={{ display: "none" }} />
+            <button onClick={() => fileRef.current.click()} style={{ ...S.btn("primary"), marginBottom: 8 }}>📷 Take / Choose Photo</button>
+            {imgPreview ? <img src={imgPreview} alt="prescription" style={{ width: "100%", borderRadius: 8, maxHeight: 240, objectFit: "contain", border: `1px solid ${C.border}` }} /> : <div style={{ border: `2px dashed ${C.border}`, borderRadius: 10, padding: "24px 0", textAlign: "center", color: "#bbb", fontSize: 13 }}>No image selected</div>}
+          </div>
+          <div style={{ marginBottom: 12 }}><label style={S.label}>Notes</label><input style={S.input} placeholder="Additional notes..." value={form.notes} onChange={e => set("notes", e.target.value)} /></div>
+        </>}
+
+        {!["prevreport", "prescription"].includes(type) && (
+          <div style={{ marginTop: 8, marginBottom: 14 }}><label style={S.label}>Notes (optional)</label><textarea style={{ ...S.input, minHeight: 52, resize: "vertical" }} placeholder="Any notes..." value={form.notes} onChange={e => set("notes", e.target.value)} /></div>
+        )}
+
+        {err && <div style={{ color: C.danger, fontSize: 13, marginBottom: 10 }}>⚠️ {err}</div>}
+        <button onClick={save} style={S.btn("primary")}>💾 Save</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [tab, setTab] = useState("home");
+  const [addType, setAddType] = useState(null);
+  const [rk, setRk] = useState(0);
+  const [toastState, setToastState] = useState({ msg: "", type: "" });
+
+  function showToast(msg, type = "ok") {
+    setToastState({ msg, type });
+    setTimeout(() => setToastState({ msg: "", type: "" }), 2500);
+  }
+  const refresh = useCallback(() => setRk(k => k + 1), []);
+
+  if (!user) return <AuthScreen onLogin={u => { setUser(u); setTab("home"); }} />;
+
+  const TABS = [
+    { id: "home", label: "Home", icon: "🏠" },
+    { id: "qr", label: "My QR", icon: "📱" },
+    { id: "records", label: "Records", icon: "📊" },
+    { id: "reports", label: "Reports", icon: "📁" },
+    { id: "profile", label: "Profile", icon: "👤" },
+  ];
+
+  return (
+    <div style={S.app}>
+      <Toast {...toastState} />
+
+      {/* Header */}
+      <div style={S.header}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          <span style={{ fontSize: 20 }}>💚</span>
+          <span style={{ fontWeight: 900, fontSize: 19, color: "#fff", letterSpacing: -0.5 }}>{APP_NAME}</span>
+          <span style={{ fontSize: 10, color: "rgba(255,255,255,.5)", background: "rgba(255,255,255,.15)", padding: "1px 7px", borderRadius: 10 }}>v{VERSION}</span>
+        </div>
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,.8)", background: "rgba(255,255,255,.15)", padding: "4px 10px", borderRadius: 20 }}>
+          {greeting().split(",")[0]}
+        </div>
+      </div>
+
+      {/* Screen */}
+      <div style={S.screen} key={rk}>
+        {tab === "home" && <HomeScreen user={user} onAdd={t => setAddType(t)} onNav={t => setTab(t)} />}
+        {tab === "qr" && <QRScreen user={user} refresh={rk} />}
+        {tab === "records" && <RecordsScreen user={user} refresh={refresh} toast={showToast} />}
+        {tab === "reports" && (
+          <div>
+            <MedsScreen user={user} refresh={refresh} toast={showToast} onAdd={t => setAddType(t)} />
+            <div style={{ borderTop: `2px dashed ${C.border}`, margin: "10px 0" }} />
+            <DoctorsScreen user={user} refresh={refresh} toast={showToast} onAdd={t => setAddType(t)} />
+            <div style={{ borderTop: `2px dashed ${C.border}`, margin: "10px 0" }} />
+            <PrevReportsScreen user={user} refresh={refresh} toast={showToast} onAdd={t => setAddType(t)} />
+          </div>
+        )}
+        {tab === "profile" && <ProfileScreen user={user} onLogout={() => { setUser(null); setTab("home"); }} onUpdateUser={u => { setUser(u); refresh(); }} toast={showToast} />}
+      </div>
+
+      {/* Bottom Nav */}
+      <div style={S.bottomNav}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={S.navBtn(tab === t.id)}>
+            <span style={{ fontSize: 17 }}>{t.icon}</span>
+            <span>{t.label}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Add sheet */}
+      {addType && <AddSheet type={addType} user={user} onClose={() => setAddType(null)} onSaved={refresh} toast={showToast} />}
+    </div>
+  );
+}
